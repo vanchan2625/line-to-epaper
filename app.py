@@ -1,25 +1,34 @@
-from flask import Flask, request, abort
+import os
+import json
+import logging
+import firebase_admin
+from firebase_admin import credentials, storage, db
+from flask import Flask, request, abort, jsonify
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
 from PIL import Image, ImageDraw, ImageFont
-import firebase_admin
-from firebase_admin import credentials, storage, db
-import os
-import time
 from datetime import timedelta
+import time
+
+# ロギングの設定
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# LINEのチャネルアクセストークンとシークレット
+# LINE Botの設定
 LINE_CHANNEL_ACCESS_TOKEN = 'zXQfQu1F2R+jUdANkbDFNEQnoNzqkWK8aTCyi5AZnWR3Ka7o+yaWZkB0sA5/DTl3QxrUjQPMHdV2qMu5tMw2whG7cKPgjgs4GIv0On7wSD3wcLZxabr6pEfudTI9J/+Q0BivyZAaX2dZJ8VlI5hlKgdB04t89/1O/w1cDnyilFU='
 LINE_CHANNEL_SECRET = 'e0e18f978a3f5f7ccee72bbfb06a4d85'
-
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# Firebaseの初期化
-cred = credentials.Certificate('serviceAccountKey.json')
+# Secret Managerからサービスアカウントキーを取得
+SERVICE_ACCOUNT_KEY = os.getenv('SERVICE_ACCOUNT_KEY')
+service_account_info = json.loads(SERVICE_ACCOUNT_KEY)
+
+# Firebaseの設定（Secret Managerを使用）
+cred = credentials.Certificate(service_account_info)
 firebase_admin.initialize_app(cred, {
     'storageBucket': 'line-to-epaper-26be0.firebasestorage.app',
     'databaseURL': 'https://line-to-epaper-26be0-default-rtdb.firebaseio.com/'
@@ -49,21 +58,28 @@ def callback():
 # メッセージ受信時の処理
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    text = event.message.text.strip()
-    if len(text) == 2:
-        # 画像を生成してFirebaseにアップロード
-        image_path = generate_image(text)
-        image_url = upload_image_to_firebase(image_path)
-        # Firebase Realtime Databaseを更新
-        update_database(image_url)
+    try:
+        text = event.message.text.strip()
+        if len(text) == 2:
+            # 画像を生成してFirebaseにアップロード
+            image_path = generate_image(text)
+            image_url = upload_image_to_firebase(image_path)
+            # Firebase Realtime Databaseを更新
+            update_database(image_url)
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text='画像を更新しました')
+            )
+        else:
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text='漢字二文字を送信してください')
+            )
+    except Exception as e:
+        logger.error(f"Error handling message: {e}", exc_info=True)
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text='画像を更新しました')
-        )
-    else:
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text='漢字二文字を送信してください')
+            TextSendMessage(text='エラーが発生しました。もう一度お試しください。')
         )
 
 def generate_image(text):
@@ -98,6 +114,11 @@ def update_database(image_url):
         'image_url': image_url,
         'timestamp': int(time.time())
     })
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    logger.error(f"Unhandled exception: {e}", exc_info=True)
+    return jsonify({"message": "内部サーバーエラーが発生しました。"}), 500
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
